@@ -1,0 +1,289 @@
+# Memgraph AI Toolkit
+
+[![PyPI - memgraph-toolbox](https://img.shields.io/pypi/v/memgraph-toolbox?label=memgraph-toolbox)](https://pypi.org/project/memgraph-toolbox/)
+[![PyPI - langchain-memgraph](https://img.shields.io/pypi/v/langchain-memgraph?label=langchain-memgraph)](https://pypi.org/project/langchain-memgraph/)
+[![PyPI - mcp-memgraph](https://img.shields.io/pypi/v/mcp-memgraph?label=mcp-memgraph)](https://pypi.org/project/mcp-memgraph/)
+[![PyPI - unstructured2graph](https://img.shields.io/pypi/v/unstructured2graph?label=unstructured2graph)](https://pypi.org/project/unstructured2graph/)
+[![Discord](https://img.shields.io/badge/Discord-Join%20Community-7289da)](https://discord.gg/memgraph)
+
+Build powerful AI applications with graph-powered RAG using [Memgraph](https://memgraph.com/). This toolkit provides everything you need to integrate knowledge graphs into your GenAI workflows.
+
+## 🚀 Quick Setup
+
+### Start Memgraph
+
+```bash
+docker run -p 7687:7687 \
+  --name memgraph \
+  memgraph/memgraph-mage:latest \
+  --schema-info-enabled=true
+```
+
+### Install Packages
+
+```bash
+# Core toolbox
+pip install memgraph-toolbox
+
+# LangChain integration
+pip install langchain-memgraph
+
+# MCP server
+pip install mcp-memgraph
+
+# Unstructured to Graph
+pip install unstructured2graph
+```
+
+---
+
+## 📚 Usage Examples
+
+### Context Graph - Capture Your Agent Sessions
+
+Turn your Claude Code and Codex sessions into a queryable knowledge graph. Install the plugin and every session records the tools it called, the skills it used, and the memories it wrote — all joined on a shared `(:Session)` node in Memgraph.
+
+Inside Claude Code:
+
+```text
+/plugin marketplace add memgraph/ai-toolkit
+/plugin install context-graph@context-graph-plugins
+```
+
+Then bootstrap, set your identity, and verify:
+
+```bash
+agent-context-graph bootstrap --runtime claude-code \
+  --connector skills-graph --connector actions-graph --connector sessions-graph
+agent-context-graph config set identity.user_id "your-name"
+agent-context-graph doctor --runtime claude-code \
+  --connector skills-graph --connector actions-graph --connector sessions-graph
+```
+
+Query across every session — e.g. which skills a user has used:
+
+```cypher
+MATCH (:User {user_id: "your-name"})-[:HAD_SESSION]->(:Session)-[:USED_SKILL]->(s:Skill)
+RETURN s.name, count(*) AS uses ORDER BY uses DESC;
+```
+
+👉 [Context Graph guide](/context-graph/) — components, Codex setup, SDK usage, and reconciling sessions into an entity graph.
+
+---
+
+### unstructured2graph - Build Knowledge Graphs from Documents
+
+Transform PDFs, URLs, and documents into queryable knowledge graphs:
+
+```python
+import asyncio
+from memgraph_toolbox.api.memgraph import Memgraph
+from lightrag_memgraph import MemgraphLightRAGWrapper
+from unstructured2graph import from_unstructured
+
+
+async def main():
+    memgraph = Memgraph()
+
+    lightrag = MemgraphLightRAGWrapper()
+    await lightrag.initialize(working_dir="./lightrag_storage")
+
+    # Ingest documents from URLs or local files
+    await from_unstructured(
+        sources=["https://example.com/doc.pdf", "./local_file.md"],
+        memgraph=memgraph,
+        lightrag_wrapper=lightrag,
+        link_chunks=True,
+        enforce_ontology=True,  # promote entity_type to real labels (:Person, :Organization, ...)
+    )
+    await lightrag.afinalize()
+
+
+asyncio.run(main())
+```
+
+👉 [Full Documentation](https://memgraph.com/docs/ai-ecosystem/unstructured2graph) | [Examples](/unstructured2graph/examples/)
+
+---
+
+### langchain-memgraph - LangChain Integration
+
+#### Natural Language Queries with MemgraphQAChain
+
+```python
+from langchain_memgraph.graphs.memgraph import MemgraphLangChain
+from langchain_memgraph.chains.graph_qa import MemgraphQAChain
+from langchain_openai import ChatOpenAI
+
+graph = MemgraphLangChain(url="bolt://localhost:7687")
+
+chain = MemgraphQAChain.from_llm(
+    ChatOpenAI(temperature=0),
+    graph=graph,
+    model_name="gpt-4-turbo",
+    allow_dangerous_requests=True,
+)
+
+response = chain.invoke("Who are the main characters in the dataset?")
+print(response["result"])
+```
+
+#### Build Agents with MemgraphToolkit
+
+```python
+from langchain.chat_models import init_chat_model
+from langchain_memgraph import MemgraphToolkit
+from langchain_memgraph.graphs.memgraph import MemgraphLangChain
+from langgraph.prebuilt import create_react_agent
+
+llm = init_chat_model("gpt-4o-mini", model_provider="openai")
+db = MemgraphLangChain(url="bolt://localhost:7687")
+toolkit = MemgraphToolkit(db=db, llm=llm)
+
+agent = create_react_agent(llm, toolkit.get_tools())
+events = agent.stream({"messages": [("user", "Find all Person nodes")]})
+```
+
+👉 [Full Documentation](https://memgraph.com/docs/ai-ecosystem/integrations#langchain)
+
+---
+
+### mcp-memgraph - Model Context Protocol Server
+
+Expose Memgraph to LLMs via MCP. Run with Docker:
+
+```bash
+# HTTP mode (recommended)
+docker run --rm -p 8000:8000 memgraph/mcp-memgraph:latest
+
+# Stdio mode for MCP clients
+docker run --rm -i -e MCP_TRANSPORT=stdio memgraph/mcp-memgraph:latest
+```
+
+**Available Tools:**
+
+| Tool                     | Description                                           |
+| ------------------------ | ----------------------------------------------------- |
+| `run_query`              | Execute Cypher queries                                |
+| `search_schema`          | Search the graph schema by regex pattern              |
+| `get_node_schema`        | Get full schema definition of a node by its labels    |
+| `get_relationship_schema`| Get full schema definition of a relationship          |
+| `get_enum_schema`        | Get schema definition of an enum by its name          |
+
+👉 [Full Documentation](https://memgraph.com/docs/ai-ecosystem/integrations#model-context-protocol-mcp)
+
+---
+
+### sql2graph Agent - Automated Database Migration
+
+Migrate from MySQL/PostgreSQL to Memgraph with AI assistance:
+
+```bash
+cd agents/sql2graph
+uv run main.py
+```
+
+👉 [Full Documentation](https://memgraph.com/docs/ai-ecosystem/agents#sql2graph-agent)
+
+---
+
+## 🛠️ Packages Overview
+
+| Package                                                 | Description                  | Install                          |
+| ------------------------------------------------------- | ---------------------------- | -------------------------------- |
+| [memgraph-toolbox](/memgraph-toolbox/)                  | Core utilities for Memgraph  | `pip install memgraph-toolbox`   |
+| [langchain-memgraph](/integrations/langchain-memgraph/) | LangChain tools and chains   | `pip install langchain-memgraph` |
+| [mcp-memgraph](/integrations/mcp-memgraph/)             | MCP server for LLMs          | `pip install mcp-memgraph`       |
+| [unstructured2graph](/unstructured2graph/)              | Document to graph conversion | `pip install unstructured2graph` |
+| [lightrag-memgraph](/integrations/lightrag-memgraph/)   | LightRAG storage on Memgraph | `pip install lightrag-memgraph`  |
+| [sql2graph](/agents/sql2graph/)                         | Database migration agent     | See docs                         |
+
+### Context Graph — capture agent sessions
+
+A family of components that persist your Claude Code / Codex sessions into one Memgraph graph. See the [Context Graph guide](/context-graph/).
+
+| Package                                                          | Description                                    | Install                             |
+| --------------------------------------------------------------- | ---------------------------------------------- | ----------------------------------- |
+| [agent-context-graph](/context-graph/agent-context-graph/)      | Event hub: routes runtime hooks to connectors  | `pip install agent-context-graph`   |
+| [actions-graph](/context-graph/actions-graph/)                  | Tool calls, results, messages as action nodes  | `pip install actions-graph`         |
+| [skills-graph](/context-graph/skills-graph/)                    | Skill definitions and per-session skill usage  | `pip install skills-graph`          |
+| [sessions-graph](/context-graph/sessions-graph/)                | User/session provenance, memories, reconciliation | `pip install sessions-graph`     |
+
+---
+
+## ❓ FAQ
+
+**Which databases are supported?**
+Memgraph is the primary target. The sql2graph agent supports MySQL and PostgreSQL as source databases.
+
+**Do I need an LLM API key?**
+Yes, for features like entity extraction (unstructured2graph) and natural language queries (langchain-memgraph).
+
+**Can I use local LLMs?**
+Yes! LangChain integration supports any LangChain-compatible model, including Ollama.
+
+---
+
+## 🤝 Community
+
+- [GitHub Issues](https://github.com/memgraph/ai-toolkit/issues)
+- [Discord](https://discord.gg/memgraph)
+- [Documentation](https://memgraph.com/docs/ai-ecosystem)
+
+⭐ If you find this toolkit helpful, please star the repository!
+
+---
+
+## 🧪 Developing Locally
+
+You can build and test each package directly from your repo.
+
+### Core tests
+
+```bash
+uv pip install -e memgraph-toolbox[test]
+pytest -s memgraph-toolbox/src/memgraph_toolbox/tests
+```
+
+### LangChain integration tests
+
+Create a `.env` file with your `OPENAI_API_KEY`, as the tests depend on LLM calls:
+
+```bash
+uv pip install -e integrations/langchain-memgraph[test]
+pytest -s integrations/langchain-memgraph/tests
+```
+
+### MCP integration tests
+
+```bash
+uv pip install -e integrations/mcp-memgraph[test]
+pytest -s integrations/mcp-memgraph/tests
+```
+
+### Context Graph tests
+
+The Context Graph components (and unstructured2graph) test against a live Memgraph. `scripts/dev-memgraph.sh` owns that lifecycle — it starts an isolated instance, runs each component's suite against it, and tears down:
+
+```bash
+./scripts/dev-memgraph.sh up
+./scripts/dev-memgraph.sh test          # all components; or e.g. `test sessions-graph`
+./scripts/dev-memgraph.sh down
+```
+
+### sql2graph agent
+
+To run a complete database migration workflow with the agent:
+
+```bash
+cd agents/sql2graph
+uv run main.py
+```
+
+**Note:** The agent requires both MySQL and Memgraph connections. Set up your environment variables in `.env` based on `.env.example`.
+
+If you are running any test on macOS in zsh, add `""` to the command:
+
+```bash
+uv pip install -e memgraph-toolbox"[test]"
+```

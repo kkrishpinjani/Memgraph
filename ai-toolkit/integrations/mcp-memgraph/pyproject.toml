@@ -1,0 +1,73 @@
+[project]
+name = "mcp-memgraph"
+version = "0.3.0"
+description = "MCP integration and utilities for Memgraph MCP server"
+readme = "README.md"
+requires-python = ">=3.10"
+
+authors = [
+  { name = "antejavor", email = "ante.javor@memgraph.io" }
+]
+
+license = { text = "MIT" }
+
+keywords = ["memgraph", "mcp", "graph", "integration", "toolkit"]
+
+classifiers = [
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.13",
+]
+
+dependencies = [
+  "httpx>=0.28.1",
+  "mcp[cli]>=1.23.0",
+  "neo4j>=5.28.1",
+  "memgraph-toolbox>=0.2.0",
+  "fastmcp>=3.2.0",
+  "pyjwt[crypto]>=2.10.1",
+  "uvicorn>=0.48",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=9.0.3",
+  "python-dotenv>=1.0.1",
+  "anthropic",
+  "mcp[cli]>=1.23.0",
+  "pytest-asyncio>=0.20.3",
+  "cryptography>=46.0.7",
+]
+
+[project.scripts]
+mcp-memgraph = "mcp_memgraph.main:main"
+
+[project.urls]
+"Homepage" = "https://github.com/memgraph/ai-toolkit"
+"Source" = "https://github.com/memgraph/ai-toolkit/tree/main/integrations/mcp-memgraph"
+"Issues" = "https://github.com/memgraph/ai-toolkit/issues"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
+
+[build-system]
+requires = ["hatchling", "build", "setuptools"]
+build-backend = "hatchling.build"
+
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.uv]
+constraint-dependencies = [
+  "authlib>=1.6.9",
+  "certifi>=2025.1.31",
+  "cryptography>=46.0.7",
+  "pyjwt>=2.10.1",
+  "python-multipart>=0.0.22",
+  "requests>=2.33.0",
+  "urllib3>=2.6.3",
+]

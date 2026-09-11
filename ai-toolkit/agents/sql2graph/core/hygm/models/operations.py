@@ -1,0 +1,195 @@
+"""
+Operation models for interactive graph model modifications.
+
+These models define the structure for operations that can be applied to
+graph models during interactive sessions.
+"""
+
+from typing import Annotated, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class ModelOperation(BaseModel):
+    """Base class for model operations."""
+
+    operation_type: str = Field(description="Type of operation to perform")
+    description: str = Field(description="Human-readable description of the operation")
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class ChangeNodeLabelOperation(ModelOperation):
+    """Operation to change a node's label."""
+
+    operation_type: Literal["change_node_label"] = "change_node_label"
+    old_label: str = Field(description="Current node label")
+    new_label: str = Field(description="New node label")
+
+
+class RenamePropertyOperation(ModelOperation):
+    """Operation to rename a property."""
+
+    operation_type: Literal["rename_property"] = "rename_property"
+    node_label: str = Field(description="Node label containing the property")
+    old_property: str = Field(description="Current property name")
+    new_property: str = Field(description="New property name")
+
+
+class DropPropertyOperation(ModelOperation):
+    """Operation to drop a property."""
+
+    operation_type: Literal["drop_property"] = "drop_property"
+    node_label: str = Field(description="Node label containing the property")
+    property_name: str = Field(description="Property name to drop")
+
+
+class AddPropertyOperation(ModelOperation):
+    """Operation to add a property."""
+
+    operation_type: Literal["add_property"] = "add_property"
+    node_label: str = Field(description="Node label to add property to")
+    property_name: str = Field(description="Property name to add")
+
+
+class ChangeRelationshipNameOperation(ModelOperation):
+    """Operation to change a relationship name."""
+
+    operation_type: Literal["change_relationship_name"] = "change_relationship_name"
+    old_name: str = Field(description="Current relationship name")
+    new_name: str = Field(description="New relationship name")
+
+
+class DropRelationshipOperation(ModelOperation):
+    """Operation to drop a relationship."""
+
+    operation_type: Literal["drop_relationship"] = "drop_relationship"
+    relationship_name: str = Field(description="Relationship name to drop")
+
+
+class AddIndexOperation(ModelOperation):
+    """Operation to add an index."""
+
+    operation_type: Literal["add_index"] = "add_index"
+    node_label: str = Field(description="Node label for the index")
+    property_name: str = Field(description="Property name for the index")
+
+
+class DropIndexOperation(ModelOperation):
+    """Operation to drop an index."""
+
+    operation_type: Literal["drop_index"] = "drop_index"
+    node_label: str = Field(description="Node label for the index")
+    property_name: str = Field(description="Property name for the index")
+
+
+class AddConstraintOperation(ModelOperation):
+    """Operation to add a constraint."""
+
+    operation_type: Literal["add_constraint"] = "add_constraint"
+    node_label: str = Field(description="Node label for the constraint")
+    property_name: str = Field(description="Property name for the constraint")
+    constraint_type: Literal["unique", "existence", "data_type"] = Field(
+        description="Type of constraint (unique, existence, or data_type)"
+    )
+    data_type: str = Field(default="", description="Data type for data_type constraints")
+
+
+class DropConstraintOperation(ModelOperation):
+    """Operation to drop a constraint."""
+
+    operation_type: Literal["drop_constraint"] = "drop_constraint"
+    node_label: str = Field(description="Node label for the constraint")
+    property_name: str = Field(description="Property name for the constraint")
+    constraint_type: Literal["unique", "existence", "data_type"] = Field(description="Type of constraint to drop")
+
+
+class AddNodeOperation(ModelOperation):
+    """Operation to add a new node type."""
+
+    operation_type: Literal["add_node"] = "add_node"
+    node_label: str = Field(description="Label for the new node")
+    properties: list[str] = Field(default_factory=list, description="List of property names for the new node")
+    source_table: str = Field(default="", description="Source table name if mapping from database")
+
+
+class DropNodeOperation(ModelOperation):
+    """Operation to drop a node type."""
+
+    operation_type: Literal["drop_node"] = "drop_node"
+    node_label: str = Field(description="Label of the node to drop")
+
+
+class AddRelationshipOperation(ModelOperation):
+    """Operation to add a new relationship."""
+
+    operation_type: Literal["add_relationship"] = "add_relationship"
+    relationship_name: str = Field(description="Name of the new relationship")
+    start_node_label: str = Field(description="Label of the start node")
+    end_node_label: str = Field(description="Label of the end node")
+    properties: list[str] = Field(default_factory=list, description="List of property names for the relationship")
+
+
+class ChangeNodeTableOperation(ModelOperation):
+    """Operation to change the source table mapped to a node."""
+
+    operation_type: Literal["change_node_table"] = "change_node_table"
+    node_label: str = Field(description="Node label whose table mapping to change")
+    new_table: str = Field(description="New source table name")
+
+
+class ChangeNodeIdColumnOperation(ModelOperation):
+    """Operation to change the id column for a node mapping."""
+
+    operation_type: Literal["change_node_id_column"] = "change_node_id_column"
+    node_label: str = Field(description="Node label whose id column to change")
+    new_id_column: str = Field(description="New id column name")
+
+
+class ChangeEdgeTableOperation(ModelOperation):
+    """Operation to change the source/join table for an edge mapping."""
+
+    operation_type: Literal["change_edge_table"] = "change_edge_table"
+    rel_type: str = Field(description="Relationship type whose table to change")
+    new_table: str = Field(description="New table name")
+
+
+class ChangeEdgeColumnsOperation(ModelOperation):
+    """Operation to change source_column and/or target_column for an edge."""
+
+    operation_type: Literal["change_edge_columns"] = "change_edge_columns"
+    rel_type: str = Field(description="Relationship type to modify")
+    new_source_column: str = Field(default="", description="New source column (empty = keep current)")
+    new_target_column: str = Field(default="", description="New target column (empty = keep current)")
+
+
+# Union type for all operations with discriminator
+OperationType = Annotated[
+    ChangeNodeLabelOperation
+    | RenamePropertyOperation
+    | DropPropertyOperation
+    | AddPropertyOperation
+    | ChangeRelationshipNameOperation
+    | DropRelationshipOperation
+    | AddIndexOperation
+    | DropIndexOperation
+    | AddConstraintOperation
+    | DropConstraintOperation
+    | AddNodeOperation
+    | DropNodeOperation
+    | AddRelationshipOperation
+    | ChangeNodeTableOperation
+    | ChangeNodeIdColumnOperation
+    | ChangeEdgeTableOperation
+    | ChangeEdgeColumnsOperation,
+    Field(discriminator="operation_type"),
+]
+
+
+class ModelModifications(BaseModel):
+    """Container for multiple model operations."""
+
+    operations: list[OperationType] = Field(description="List of operations to apply to the graph model")
+    reasoning: str = Field(description="Explanation of why these changes improve the model")
+
+    model_config = ConfigDict(extra="forbid")

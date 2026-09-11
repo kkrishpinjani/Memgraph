@@ -1,0 +1,224 @@
+"""
+LLM-specific models for Hypothetical Graph Modeling (HyGM).
+
+These models define the structure for LLM input/output and interactive
+operations.
+"""
+
+from enum import Enum
+from typing import TYPE_CHECKING, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+if TYPE_CHECKING:
+    from .graph_models import GraphModel
+
+
+class GraphModelingStrategy(Enum):
+    """Graph modeling strategies available."""
+
+    DETERMINISTIC = "deterministic"  # Rule-based graph creation
+    LLM_POWERED = "llm_powered"  # LLM generates the graph model
+
+
+class ModelingMode(Enum):
+    """Modeling modes available."""
+
+    AUTOMATIC = "automatic"  # Generate model without user interaction
+    INTERACTIVE = "interactive"  # Interactive mode with user feedback
+
+
+# Structured output models for LLM graph generation
+class LLMGraphNode(BaseModel):
+    """Node definition for LLM-generated graph models."""
+
+    name: str = Field(description="Unique identifier for the node")
+    labels: list[str] = Field(description="Cypher labels for the node (e.g., ['User'], ['Product'])")
+    properties: list[str] = Field(description="List of properties to include from source table")
+    primary_key: str = Field(description="Primary key property name")
+    indexes: list[str] = Field(description="Properties that should have indexes")
+    constraints: list[str] = Field(description="Properties that should have uniqueness constraints")
+    source_table: str = Field(description="Source SQL table name")
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class LLMGraphRelationship(BaseModel):
+    """Relationship definition for LLM-generated graph models."""
+
+    name: str = Field(description="Relationship type name (e.g., 'OWNS', 'BELONGS_TO')")
+    type: Literal["one_to_many", "many_to_many", "one_to_one"] = Field(description="Cardinality of the relationship")
+    from_node: str = Field(description="Source node name")
+    to_node: str = Field(description="Target node name")
+    properties: list[str] = Field(description="Properties to include on the relationship (if any)", default=[])
+    directionality: Literal["directed", "undirected"] = Field(description="Whether the relationship has direction")
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class LLMGraphModel(BaseModel):
+    """Complete graph model structure for LLM generation."""
+
+    nodes: list[LLMGraphNode] = Field(description="All nodes in the graph model")
+    relationships: list[LLMGraphRelationship] = Field(description="All relationships in the graph model")
+
+    model_config = ConfigDict(extra="forbid")
+
+    def to_graph_model(self) -> "GraphModel":
+        """Convert LLMGraphModel to GraphModel for schema export."""
+        from .graph_models import (
+            GraphConstraint,
+            GraphIndex,
+            GraphModel,
+            GraphNode,
+            GraphProperty,
+            GraphRelationship,
+        )
+        from .sources import (
+            ConstraintSource,
+            IndexSource,
+            NodeSource,
+            PropertySource,
+            RelationshipSource,
+        )
+
+        # Convert nodes
+        graph_nodes = []
+        node_indexes = []
+        node_constraints = []
+
+        for llm_node in self.nodes:
+            # Create properties with proper GraphProperty objects
+            properties = []
+            for prop_name in llm_node.properties:
+                graph_prop = GraphProperty(
+                    key=prop_name,
+                    count=1,
+                    filling_factor=100.0,
+                    types=[{"type": "String", "count": 1, "examples": [""]}],
+                    source=PropertySource(field=f"{llm_node.source_table}.{prop_name}"),
+                )
+                properties.append(graph_prop)
+
+            # Create node source
+            node_source = NodeSource(
+                type="table",
+                name=llm_node.source_table,
+                location=f"database.schema.{llm_node.source_table}",
+                mapping={
+                    "labels": llm_node.labels,
+                    "id_field": (f"{llm_node.source_table}.{llm_node.primary_key}"),
+                },
+            )
+
+            graph_node = GraphNode(
+                labels=llm_node.labels,
+                count=1,
+                properties=properties,
+                examples=[{"gid": 0}],
+                source=node_source,
+            )
+            graph_nodes.append(graph_node)
+
+            # Create indexes for this node
+            for index_prop in llm_node.indexes:
+                index_source = IndexSource(
+                    origin="llm_recommendation",
+                    reason=f"Index recommended by LLM for {llm_node.name}.{index_prop}",
+                    created_by="ai_analysis",
+                    index_name=None,
+                    migrated_from=None,
+                )
+                graph_index = GraphIndex(
+                    labels=llm_node.labels,
+                    properties=[index_prop],
+                    type="label+property",
+                    source=index_source,
+                )
+                node_indexes.append(graph_index)
+
+            # Create constraints for this node
+            for constraint_prop in llm_node.constraints:
+                constraint_source = ConstraintSource(
+                    origin="llm_recommendation",
+                    constraint_name=f"ai_unique_constraint_{llm_node.name}_{constraint_prop}",
+                    migrated_from="ai_analysis",
+                )
+                graph_constraint = GraphConstraint(
+                    type="unique",
+                    labels=llm_node.labels,
+                    properties=[constraint_prop],
+                    source=constraint_source,
+                )
+                node_constraints.append(graph_constraint)
+
+        # Build a lookup from node name → source table
+        node_table_map = {}
+        node_pk_map = {}
+        for node in self.nodes:
+            node_table_map[node.name] = node.source_table
+            node_pk_map[node.name] = node.primary_key
+
+        # Convert relationships
+        graph_relationships = []
+        for llm_rel in self.relationships:
+            # Find source/target node labels and tables
+            from_labels = []
+            to_labels = []
+            for node in self.nodes:
+                if node.name == llm_rel.from_node:
+                    from_labels = node.labels
+                if node.name == llm_rel.to_node:
+                    to_labels = node.labels
+
+            from_table = node_table_map.get(llm_rel.from_node, "")
+            to_table = node_table_map.get(llm_rel.to_node, "")
+            from_pk = node_pk_map.get(llm_rel.from_node, "id")
+            to_pk = node_pk_map.get(llm_rel.to_node, "id")
+
+            # For one-to-many the FK lives in the "from" side's table;
+            # use the target table as the source table name.
+            # Fall back to the from_table when we can't determine better.
+            source_table = to_table or from_table
+
+            # Create relationship properties
+            rel_properties = []
+            for prop_name in llm_rel.properties:
+                rel_prop = GraphProperty(
+                    key=prop_name,
+                    count=1,
+                    filling_factor=100.0,
+                    types=[{"type": "String", "count": 1, "examples": [""]}],
+                )
+                rel_properties.append(rel_prop)
+
+            # Create relationship source with actual SQL table/column info
+            rel_source = RelationshipSource(
+                type="table",
+                name=source_table,
+                location=f"database.schema.{source_table}",
+                mapping={
+                    "start_node": f"{from_table}.{from_pk}",
+                    "end_node": f"{to_table}.{to_pk}",
+                    "edge_type": llm_rel.name,
+                },
+            )
+
+            graph_rel = GraphRelationship(
+                edge_type=llm_rel.name,
+                start_node_labels=from_labels,
+                end_node_labels=to_labels,
+                count=1,
+                properties=rel_properties,
+                examples=[{}],
+                source=rel_source,
+                directionality=llm_rel.directionality,
+            )
+            graph_relationships.append(graph_rel)
+
+        return GraphModel(
+            nodes=graph_nodes,
+            edges=graph_relationships,
+            node_indexes=node_indexes,
+            node_constraints=node_constraints,
+        )

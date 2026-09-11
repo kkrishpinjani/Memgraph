@@ -1,0 +1,463 @@
+# 🚀 Memgraph MCP Server
+
+Memgraph MCP Server is a lightweight server implementation of the Model Context Protocol (MCP) designed to connect Memgraph with LLMs and different clients.
+
+## 🔧Tools
+
+The Memgraph MCP Server exposes the following tools over MCP. Each tool runs a Memgraph‐toolbox operation and returns a list of records (dictionaries).
+
+### run_query(query: str)
+
+Run any arbitrary Cypher query against the connected Memgraph database. Returns
+one row per result, with each value in a **type-preserving** form: nodes,
+relationships and paths come back as `_type`-tagged objects carrying their `id`,
+`labels`/`type`, endpoints and `properties`; primitives, lists, maps, temporals
+and points keep their shape. A single node looks like:
+
+```json
+{
+  "n": {
+    "_type": "node",
+    "id": "<element_id>",
+    "labels": ["Person"],
+    "properties": { "name": "Alice" }
+  }
+}
+```
+
+Because rows are preserved, a query can mix graph entities with scalars — e.g.
+`MATCH (n)-[e]->() RETURN n, count(e) AS out_deg` returns each node alongside its
+count.
+
+To get a **deduplicated, ready-to-render graph** (each node and relationship
+once — useful for visualization), let Cypher do the dedup and return the two
+lists directly:
+
+```cypher
+MATCH (n)-[r]->(m)
+WITH collect(DISTINCT r) AS relationships, collect(DISTINCT n) + collect(DISTINCT m) AS ns
+UNWIND ns AS nx
+RETURN collect(DISTINCT nx) AS nodes, relationships
+```
+
+Each collected node and relationship comes back in the same typed form as above,
+so the result is a compact graph payload without repeating shared nodes per row.
+
+**Read-Only Mode:** By default, the server runs in read-only mode to prevent accidental data modifications. Write operations (CREATE, MERGE, DELETE, SET, DROP, REMOVE) are automatically blocked and will return an error. Set `MCP_READ_ONLY=false` to enable write operations.
+
+Parameters:
+
+- `query`: A valid Cypher query string.
+
+### get_configuration()
+
+Fetch the current Memgraph configuration settings.
+Equivalent to running `SHOW CONFIGURATION`.
+
+### get_index()
+
+Retrieve information about existing indexes.
+Equivalent to running `SHOW INDEX INFO`.
+
+### get_constraint()
+
+Retrieve information about existing constraints.
+Equivalent to running `SHOW CONSTRAINT INFO`.
+
+### get_schema()
+
+Fetch the graph schema (labels, relationships, property keys).
+Equivalent to running `SHOW SCHEMA INFO`.
+
+### get_storage()
+
+Retrieve storage usage metrics for nodes, relationships, and properties.
+Equivalent to running `SHOW STORAGE INFO`.
+
+### get_triggers()
+
+List all database triggers.
+Equivalent to running `SHOW TRIGGERS`.
+
+### get_procedures()
+
+List all available Memgraph procedures (query modules).
+Returns information about all available procedures including MAGE algorithms and custom query modules. Each procedure includes its name, signature, and whether it performs write operations.
+Use this to discover available graph algorithms and utility functions before executing them.
+Equivalent to running `CALL mg.procedures() YIELD *`.
+
+### get_betweenness_centrality()
+
+Compute betweenness centrality on the entire graph.
+Uses `BetweennessCentralityTool` under the hood.
+
+### get_page_rank()
+
+Compute PageRank scores for all nodes.
+Uses `PageRankTool` under the hood.
+
+### get_node_neighborhood(node_id: str, max_distance: int = 1, limit: int = 100)
+
+Find nodes within a specified distance from a given node.
+Parameters:
+
+- `node_id`: The ID of the starting node to find neighborhood around
+- `max_distance`: Maximum distance (hops) to search from the starting node. Default is 1
+- `limit`: Maximum number of nodes to return. Default is 100
+
+Uses `NodeNeighborhoodTool` under the hood.
+
+### search_node_vectors(index_name: str, query_vector: List[float], limit: int = 10)
+
+Perform vector similarity search on nodes in Memgraph using cosine similarity.
+Parameters:
+
+- `index_name`: Name of the index to use for the vector search
+- `query_vector`: Query vector to search for similarity
+- `limit`: Number of similar nodes to return. Default is 10
+
+Uses `NodeVectorSearchTool` under the hood.
+
+### list_databases() — _auth-only_
+
+Available only when `MCP_AUTH_ENABLED=true`. Returns the databases the calling
+user is authorized to access (the intersection of their JWT `tenants` claim and
+the server's `MCP_TENANT_CATALOG`). The currently-active database is flagged.
+
+### use_database(name: str) — _auth-only_
+
+Available only when `MCP_AUTH_ENABLED=true`. Switches the active database for
+the current MCP session. The new name must be in the caller's allowed set —
+the tool cannot expand authorization beyond what the JWT grants.
+
+## 🐳 Run Memgraph MCP server with Docker
+
+### Building Memgraph MCP image
+
+To build the Docker image using your local `memgraph-toolbox` code, run from the root of the monorepo:
+
+```bash
+cd /path/to/ai-toolkit
+docker build -f integrations/mcp-memgraph/Dockerfile -t memgraph/mcp-memgraph:latest .
+```
+
+This will include your local `memgraph-toolbox` and install it inside the image.
+
+The image is also available on Docker Hub:
+
+```bash
+docker pull memgraph/mcp-memgraph:latest
+```
+
+### Running the Docker image
+
+#### 1. Streamable HTTP mode (recommended for most users)
+
+To connect to local Memgraph containers, by default the MCP server will be available at `http://localhost:8000/mcp/`:
+
+```bash
+docker run --rm memgraph/mcp-memgraph:latest
+```
+
+#### 2. Stdio mode (for integration with MCP stdio clients)
+
+Configure your MCP host to run the docker command and utilize stdio:
+
+```bash
+docker run --rm -i -e MCP_TRANSPORT=stdio memgraph/mcp-memgraph:latest
+```
+
+> 📄 Note: By default, the server will connect to a Memgraph instance running on localhost docker network `bolt://host.docker.internal:7687`. If you have a Memgraph instance running on a different host or port, you can specify it using environment variables.
+
+#### 3. Custom Memgraph connection (external instance, no host network)
+
+To avoid using host networking, or to connect to an external Memgraph instance:
+
+```bash
+docker run --rm \
+  -p 8000:8000 \
+  -e MEMGRAPH_URL=bolt://memgraph:7687 \
+  -e MEMGRAPH_USER=myuser \
+  -e MEMGRAPH_PASSWORD=password \
+  memgraph/mcp-memgraph:latest
+```
+
+## ⚙️ Configuration
+
+### Environment Variables
+
+The following environment variables can be used to configure the Memgraph MCP Server, whether running with Docker or directly (e.g., with `uv` or `python`).
+
+#### Memgraph Connection
+
+- `MEMGRAPH_URL`: The Bolt URL of the Memgraph instance to connect to. Default: `bolt://host.docker.internal:7687`
+  - The default value allows you to connect to a Memgraph instance running on your host machine from within the Docker container.
+- `MEMGRAPH_USER`: The username for authentication. Default: `memgraph`
+- `MEMGRAPH_PASSWORD`: The password for authentication. Default: empty
+- `MEMGRAPH_DATABASE`: The database name to connect to. Default: `memgraph`
+
+#### Server Configuration
+
+- `MCP_SERVER`: The server implementation to use. Options: `server` (default), `memgraph-experimental`
+  - `server`: Production-ready server with all stable Memgraph tools
+  - `memgraph-experimental`: Experimental server with adaptive query optimization and autonomous index management
+    - **Note**: Read-only mode is not supported on this server as it requires write access to create indexes
+- `MCP_TRANSPORT`: The transport protocol to use. Options: `streamable-http` (default), `stdio`
+- `MCP_READ_ONLY`: Enable read-only mode to prevent write operations (CREATE, MERGE, DELETE, SET, DROP, REMOVE). Options: `true` (default), `false`
+  - When set to `true`, all write queries will be blocked with an error message
+  - Set to `false` to allow write operations on the database
+  - **Only applies to the default `server`** - the `memgraph-experimental` server ignores this setting
+
+You can set these environment variables in your shell, in your Docker run command, or in your deployment environment.
+
+### 🔐 Multi-tenant Authentication (optional)
+
+The server can optionally enforce **OIDC / JWT authentication** on the
+streamable-HTTP transport and route each authenticated session to a different
+Memgraph logical database based on JWT claims. Disabled by default — when off,
+the server runs exactly as it did in 0.1.12.
+
+#### When to enable it
+
+- You want different users to see different Memgraph databases on the same MCP
+  Deployment.
+- You're putting MCP behind an OIDC provider (Keycloak, Auth0, Okta, Entra ID,
+  …).
+- You want per-user audit trails on tool calls.
+
+#### Environment variables
+
+All no-ops when `MCP_AUTH_ENABLED=false` (default). When enabled, the server
+**fails fast at startup** if any of the three required vars are missing.
+
+| Var                             | Default                                           | Required when auth on | Purpose                                                                                                                                             |
+| ------------------------------- | ------------------------------------------------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MCP_AUTH_ENABLED`              | `false`                                           | —                     | Master switch                                                                                                                                       |
+| `MCP_AUTH_ISSUER`               | —                                                 | ✓                     | OIDC issuer URL, e.g. `https://auth.example.com/realms/memgraph`                                                                                    |
+| `MCP_AUTH_AUDIENCE`             | —                                                 | ✓                     | Expected `aud` claim on JWTs the server will accept                                                                                                 |
+| `MCP_TENANT_CATALOG`            | —                                                 | ✓                     | Comma-separated tenants this MCP deployment serves; names must match the JWT `tenants` claim values _and_ the corresponding Memgraph database names |
+| `MCP_AUTH_JWKS_URL`             | derived: `<issuer>/protocol/openid-connect/certs` | —                     | Override JWKS endpoint (rarely needed)                                                                                                              |
+| `MCP_AUTH_TENANTS_CLAIM`        | `tenants`                                         | —                     | Claim holding the user's allowed tenant list (must be an array of strings)                                                                          |
+| `MCP_AUTH_DEFAULT_TENANT_CLAIM` | `default_tenant`                                  | —                     | Optional claim selecting the user's preferred initial tenant; if absent the server picks the alphabetically-first allowed one                       |
+| `MCP_AUTH_REQUIRED_SCOPE`       | `mcp:tools`                                       | —                     | Scope the JWT must carry                                                                                                                            |
+| `MCP_AUTH_STATIC_CLIENT_ID`     | —                                                 | —                     | Opt-in DCR intercept (see below)                                                                                                                    |
+
+#### How it works
+
+1. Every request to `/mcp` must carry `Authorization: Bearer <JWT>`.
+2. The middleware validates the JWT signature against Keycloak's JWKS (cached
+   in-process; auto-refreshed when an unknown `kid` arrives).
+3. It verifies `iss`, `aud`, `exp`, and the required scope.
+4. It reads the `tenants` array claim, intersects it with `MCP_TENANT_CATALOG`,
+   and builds a per-session `SessionAuth` keyed by `Mcp-Session-Id`.
+5. The session's `current_tenant` defaults to the JWT's `default_tenant` (if
+   provided and allowed) or the first allowed tenant otherwise.
+6. Each tool call routes to the Memgraph database with the same name as
+   `current_tenant`.
+
+Inside a session, a user can switch among their allowed databases with the
+`use_database` tool; `list_databases` shows them what's available.
+
+#### Discovery endpoints exposed when auth is enabled
+
+| Path                                          | Purpose                                                              |
+| --------------------------------------------- | -------------------------------------------------------------------- |
+| `GET /.well-known/oauth-protected-resource`   | RFC 9728 PRM telling MCP clients which authorization server to use   |
+| `GET /.well-known/oauth-authorization-server` | RFC 8414 AS metadata (proxied from the upstream IdP)                 |
+| `GET /.well-known/openid-configuration`       | OIDC discovery (proxied from the upstream IdP)                       |
+| `POST /register`                              | DCR intercept — only present when `MCP_AUTH_STATIC_CLIENT_ID` is set |
+
+The discovery document fetched from the upstream IdP is cached in-process; it's
+re-fetched on next request if the cache is empty (e.g., the IdP was down on
+the first attempt).
+
+#### DCR intercept (workaround for Claude Code today)
+
+Some MCP clients — notably current Claude Code (see
+[anthropics/claude-code#26675](https://github.com/anthropics/claude-code/issues/26675))
+— force Dynamic Client Registration even when a pre-registered `clientId` is
+configured. Setting `MCP_AUTH_STATIC_CLIENT_ID=<your-public-client-id>` makes
+the MCP server lie to those clients: it returns the same pre-registered
+client_id for every DCR request, sidestepping the bug.
+
+When that's set, PRM also advertises the MCP server itself as the
+`authorization_server` so DCR comes back to us instead of going directly to
+the IdP. All other OAuth flows still happen against the real IdP (authorize,
+token, JWKS).
+
+Leave `MCP_AUTH_STATIC_CLIENT_ID` unset for production deployments where your
+IDE clients respect pre-configured `clientId` values.
+
+#### What you need on the IdP side
+
+Roughly, in any OIDC provider:
+
+1. A public client with PKCE enabled, redirect URI patterns matching whatever
+   IDEs you'll use (e.g., `http://localhost:*`, `vscode://*`, `cursor://*`,
+   `claude://*`).
+2. A `tenants` claim mapper that emits a JSON-array claim of the user's
+   tenant memberships (in Keycloak: a Group Membership mapper; in Auth0/Okta:
+   a custom rule reading group/role attributes).
+3. An audience claim mapper baking your `MCP_AUTH_AUDIENCE` value into issued
+   tokens.
+4. A scope (default: `mcp:tools`) attached to the client.
+5. For each tenant in `MCP_TENANT_CATALOG`, a corresponding Memgraph logical
+   database created via `CREATE DATABASE <name>`.
+
+A complete Keycloak example (single-pod, dev-mode) is available in the
+[`keycloak-k8s/`](https://github.com/memgraph/keycloak-k8s) reference setup.
+
+### Multi-Server Architecture
+
+The MCP server supports multiple server implementations that can be selected via the `MCP_SERVER` environment variable:
+
+- **`server`** (default): Production server with all stable tools (run_query, get_schema, get_configuration, etc.)
+- **`memgraph-experimental`**: Experimental server with **autonomous GraphRAG capabilities** using FastMCP's native sampling and elicitation:
+
+To use the experimental Memgraph server:
+
+```bash
+# With uv
+MCP_SERVER=memgraph-experimental uv run mcp-memgraph
+
+# With Docker
+docker run --rm -e MCP_SERVER=memgraph-experimental memgraph/mcp-memgraph:latest
+```
+
+To add a new server implementation, create a new file in `src/mcp_memgraph/servers/` and register it in the `AVAILABLE_SERVERS` dictionary in `src/mcp_memgraph/servers/__init__.py`.
+
+## Connecting from VS Code (HTTP server)
+
+If you are using VS Code MCP extension or similar, your configuration for an HTTP server would look like:
+
+```json
+{
+  "servers": {
+    "mcp-memgraph-http": {
+      "url": "http://localhost:8000/mcp/"
+    }
+  }
+}
+```
+
+> **Note:** The URL must end with `/mcp/`.
+
+---
+
+## Running the Docker image in Visual Studio Code using stdio
+
+You can also run the server using stdio for integration with MCP stdio clients:
+
+1. Open Visual Studio Code, open Command Palette (Ctrl+Shift+P or Cmd+Shift+P on Mac), and select `MCP: Add server...`.
+2. Choose `Command (stdio)`
+3. Enter `docker` as the command to run.
+4. For Server ID enter `mcp-memgraph`.
+5. Choose "User" (adds to user-space `settings.json`) or "Workspace" (adds to `.vscode/mcp.json`).
+
+When the settings open, enhance the args as follows:
+
+```json
+{
+  "servers": {
+    "mcp-memgraph": {
+      "type": "stdio",
+      "command": "docker",
+      "args": [
+        "run",
+        "--rm",
+        "-i",
+        "-e",
+        "MCP_TRANSPORT=stdio",
+        "memgraph/mcp-memgraph:latest"
+      ]
+    }
+  }
+}
+```
+
+To connect to a remote Memgraph instance with authentication, add environment variables to the `args` list:
+
+```json
+{
+  "servers": {
+    "mcp-memgraph": {
+      "type": "stdio",
+      "command": "docker",
+      "args": [
+        "run",
+        "--rm",
+        "-i",
+        "-e",
+        "MCP_TRANSPORT=stdio",
+        "-e",
+        "MEMGRAPH_URL=bolt://memgraph:7687",
+        "-e",
+        "MEMGRAPH_USER=myuser",
+        "-e",
+        "MEMGRAPH_PASSWORD=mypassword",
+        "memgraph/mcp-memgraph:latest"
+      ]
+    }
+  }
+}
+```
+
+---
+
+Open GitHub Copilot in Agent mode and you'll be able to interact with the Memgraph MCP server.
+
+## Run Memgraph MCP server with Claude
+
+1. Install [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
+2. Install [Claude for Desktop](https://claude.ai/download).
+3. Add the Memgraph server to Claude config
+
+You can do it in the UI, by opening your Claude desktop app navigate to `Settings`, under the `Developer` section, click on `Edit Config` and add the
+following content:
+
+```
+{
+    "mcpServers": {
+      "mpc-memgraph": {
+        "command": "uv",
+        "args": [
+            "run",
+            "--with",
+            "mcp-memgraph",
+            "--python",
+            "3.13",
+            "mcp-memgraph"
+        ]
+     }
+   }
+}
+```
+
+Or you can open the config file in your favorite text editor. The location of the config file depends on your operating system:
+
+**MacOS/Linux**
+
+```
+~/Library/Application\ Support/Claude/claude_desktop_config.json
+```
+
+**Windows**
+
+```
+%APPDATA%/Claude/claude_desktop_config.json
+```
+
+> [!NOTE]
+> You may need to put the full path to the uv executable in the command field. You can get this by running `which uv` on MacOS/Linux or `where uv` on Windows. Make sure you pass in the absolute path to your server.
+
+## Running Memgraph
+
+For the examples above it is assumed that you have a Memgraph running:
+
+Run Memgraph MAGE:
+
+```
+docker run -p 7687:7687 memgraph/memgraph-mage --schema-info-enabled=True
+```
+
+The `--schema-info-enabled` configuration setting is set to `True` to allow LLM to run `SHOW SCHEMA INFO` query.

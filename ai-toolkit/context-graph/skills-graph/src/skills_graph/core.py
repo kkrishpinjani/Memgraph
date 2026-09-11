@@ -1,0 +1,392 @@
+import json
+from datetime import datetime, timezone
+
+from memgraph_toolbox.api.memgraph import Memgraph
+
+from .models import Skill
+
+
+class SkillGraph:
+    """Persist, retrieve and evolve AI skills in Memgraph.
+
+    Stores skills as (:Skill) nodes with optional
+    (:Skill)-[:DEPENDS_ON]->(:Skill) dependency edges.
+    """
+
+    def __init__(self, memgraph: Memgraph | None = None, **kwargs):
+        """Initialize SkillGraph.
+
+        Args:
+            memgraph: An existing Memgraph client instance. If not provided,
+                      a new one is created using kwargs / environment variables.
+            **kwargs: Forwarded to Memgraph() when memgraph is None.
+        """
+        self._db = memgraph or Memgraph(**kwargs)
+
+    # ------------------------------------------------------------------
+    # Schema setup
+    # ------------------------------------------------------------------
+
+    def setup(self) -> None:
+        """Create constraints and indexes required for skill storage."""
+        self._db.query("CREATE CONSTRAINT ON (s:Skill) ASSERT s.name IS UNIQUE;")
+        self._db.query("CREATE INDEX ON :Skill(name);")
+
+    def drop(self) -> None:
+        """Remove all skill-related constraints and indexes."""
+        self._db.query("DROP CONSTRAINT ON (s:Skill) ASSERT s.name IS UNIQUE;")
+        self._db.query("DROP INDEX ON :Skill(name);")
+
+    # ------------------------------------------------------------------
+    # CRUD
+    # ------------------------------------------------------------------
+
+    def add_skill(self, skill: Skill) -> Skill:
+        """Persist a skill to Memgraph.
+
+        Creates or replaces the :Skill node fields and returns the stored skill.
+        """
+        self._db.query(
+            """
+            MERGE (s:Skill {name: $name})
+            ON CREATE SET s.created_at = $created_at
+            SET s.description = $description,
+                s.content = $content,
+                s.license = $license,
+                s.compatibility = $compatibility,
+                s.metadata = $metadata,
+                s.allowed_tools = $allowed_tools,
+                s.updated_at = $updated_at
+            """,
+            params={
+                "name": skill.name,
+                "description": skill.description,
+                "content": skill.content,
+                "license": skill.license,
+                "compatibility": skill.compatibility,
+                "metadata": json.dumps(skill.metadata),
+                "allowed_tools": json.dumps(skill.allowed_tools),
+                "created_at": skill.created_at,
+                "updated_at": skill.updated_at,
+            },
+        )
+
+        return skill
+
+    def get_skill(self, name: str) -> Skill | None:
+        """Retrieve a single skill by name."""
+        rows = self._db.query(
+            """
+            MATCH (s:Skill {name: $name})
+            RETURN s.name AS name,
+                   s.description AS description,
+                   s.content AS content,
+                   s.license AS license,
+                   s.compatibility AS compatibility,
+                   s.metadata AS metadata,
+                   s.allowed_tools AS allowed_tools,
+                   s.created_at AS created_at,
+                   s.updated_at AS updated_at
+            """,
+            params={"name": name},
+        )
+
+        if not rows:
+            return None
+
+        row = rows[0]
+        return self._row_to_skill(row)
+
+    def update_skill(
+        self,
+        name: str,
+        *,
+        description: str | None = None,
+        content: str | None = None,
+        license: str | None = None,
+        compatibility: str | None = None,
+        metadata: dict[str, str] | None = None,
+        allowed_tools: list[str] | None = None,
+    ) -> Skill | None:
+        """Update an existing skill. Only provided fields are changed."""
+        sets: list[str] = []
+        params: dict = {
+            "name": name,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        if description is not None:
+            sets.append("s.description = $description")
+            params["description"] = description
+        if content is not None:
+            sets.append("s.content = $content")
+            params["content"] = content
+        if license is not None:
+            sets.append("s.license = $license")
+            params["license"] = license
+        if compatibility is not None:
+            sets.append("s.compatibility = $compatibility")
+            params["compatibility"] = compatibility
+        if metadata is not None:
+            sets.append("s.metadata = $metadata")
+            params["metadata"] = json.dumps(metadata)
+        if allowed_tools is not None:
+            sets.append("s.allowed_tools = $allowed_tools")
+            params["allowed_tools"] = json.dumps(allowed_tools)
+
+        sets.append("s.updated_at = $updated_at")
+
+        self._db.query(
+            f"MATCH (s:Skill {{name: $name}}) SET {', '.join(sets)}",
+            params=params,
+        )
+
+        return self.get_skill(name)
+
+    def delete_skill(self, name: str) -> bool:
+        """Delete a skill and its relationships. Returns True if deleted."""
+        rows = self._db.query(
+            """
+            MATCH (s:Skill {name: $name})
+            DETACH DELETE s
+            RETURN count(s) AS deleted
+            """,
+            params={"name": name},
+        )
+        return bool(rows and rows[0].get("deleted", 0) > 0)
+
+    def record_skill_usage(
+        self,
+        *,
+        session_id: str,
+        skill_name: str,
+        action: str,
+        timestamp: str,
+        create_missing: bool = False,
+        description: str = "",
+        content: str = "",
+        source_path: str | None = None,
+        metadata: dict[str, str] | None = None,
+        container_agent_id: str | None = None,
+    ) -> None:
+        """Record that a session (or a specific Agent within it) used a skill.
+
+        By default this preserves the historical behavior and only records
+        usage for skills that already exist. Inferred local SKILL.md reads can
+        opt into creating a minimal Skill node so filesystem-based skill use is
+        not dropped.
+
+        Args:
+            container_agent_id: If set AND a matching Agent node already
+                exists, USED_SKILL attaches to it instead of the Session
+                directly, mirroring HAS_ACTION's either-container pattern
+                (actions-graph's Agent node, #278). Some adapters (e.g. the
+                OpenAI Agents SDK one) set an agent name for every running
+                agent, not just genuine nested subagents, and not every
+                caller wires actions-graph's connector to create the node at
+                all -- falling back to the Session when no such Agent node
+                exists (rather than a hard MATCH that would silently drop
+                the whole usage record) keeps this correct either way.
+        """
+        resolved_agent_id = None
+        if container_agent_id:
+            exists_rows = self._db.query(
+                "MATCH (a:Agent {agent_id: $agent_id}) RETURN count(a) AS c",
+                params={"agent_id": container_agent_id},
+            )
+            if exists_rows and exists_rows[0]["c"] > 0:
+                resolved_agent_id = container_agent_id
+
+        params = {
+            "session_id": session_id,
+            "skill_name": skill_name,
+            "timestamp": timestamp,
+            "action": action,
+            "description": description,
+            "content": content,
+            "metadata": json.dumps(metadata or {}),
+            "source_path": source_path,
+            "agent_id": resolved_agent_id,
+        }
+
+        container_match = (
+            "MATCH (container:Agent {agent_id: $agent_id})"
+            if resolved_agent_id
+            else "MERGE (container:Session {session_id: $session_id})"
+        )
+
+        if create_missing:
+            self._db.query(
+                f"""
+                {container_match}
+                WITH container
+                MERGE (sk:Skill {{name: $skill_name}})
+                ON CREATE SET sk.description = $description,
+                              sk.content = $content,
+                              sk.license = null,
+                              sk.compatibility = null,
+                              sk.metadata = $metadata,
+                              sk.allowed_tools = "[]",
+                              sk.created_at = $timestamp,
+                              sk.updated_at = $timestamp,
+                              sk.source_path = $source_path
+                ON MATCH SET sk.source_path = coalesce(sk.source_path, $source_path)
+                MERGE (container)-[r:USED_SKILL]->(sk)
+                ON CREATE SET r.first_access = $timestamp,
+                              r.access_count = 1,
+                              r.actions = [$action]
+                ON MATCH SET r.last_access = $timestamp,
+                             r.access_count = r.access_count + 1,
+                             r.actions = r.actions + $action
+                """,
+                params=params,
+            )
+            return
+
+        self._db.query(
+            f"""
+            {container_match}
+            WITH container
+            MATCH (sk:Skill {{name: $skill_name}})
+            MERGE (container)-[r:USED_SKILL]->(sk)
+            ON CREATE SET r.first_access = $timestamp,
+                          r.access_count = 1,
+                          r.actions = [$action]
+            ON MATCH SET r.last_access = $timestamp,
+                         r.access_count = r.access_count + 1,
+                         r.actions = r.actions + $action
+            """,
+            params=params,
+        )
+
+    # ------------------------------------------------------------------
+    # Query / Search
+    # ------------------------------------------------------------------
+
+    def list_skills(self) -> list[Skill]:
+        """Return all stored skills."""
+        rows = self._db.query(
+            """
+            MATCH (s:Skill)
+            RETURN s.name AS name,
+                   s.description AS description,
+                   s.content AS content,
+                   s.license AS license,
+                   s.compatibility AS compatibility,
+                   s.metadata AS metadata,
+                   s.allowed_tools AS allowed_tools,
+                   s.created_at AS created_at,
+                   s.updated_at AS updated_at
+            ORDER BY name
+            """
+        )
+        return [self._row_to_skill(r) for r in rows]
+
+    def search_by_name(self, pattern: str) -> list[Skill]:
+        """Find skills whose name contains the given substring (case-insensitive)."""
+        rows = self._db.query(
+            """
+            MATCH (s:Skill)
+            WHERE toLower(s.name) CONTAINS toLower($pattern)
+            RETURN s.name AS name,
+                   s.description AS description,
+                   s.content AS content,
+                   s.license AS license,
+                   s.compatibility AS compatibility,
+                   s.metadata AS metadata,
+                   s.allowed_tools AS allowed_tools,
+                   s.created_at AS created_at,
+                   s.updated_at AS updated_at
+            ORDER BY name
+            """,
+            params={"pattern": pattern},
+        )
+        return [self._row_to_skill(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Dependencies
+    # ------------------------------------------------------------------
+
+    def add_dependency(self, skill_name: str, depends_on: str) -> None:
+        """Record that *skill_name* depends on *depends_on*."""
+        self._db.query(
+            """
+            MATCH (a:Skill {name: $skill_name}), (b:Skill {name: $depends_on})
+            MERGE (a)-[:DEPENDS_ON]->(b)
+            """,
+            params={"skill_name": skill_name, "depends_on": depends_on},
+        )
+
+    def remove_dependency(self, skill_name: str, depends_on: str) -> None:
+        """Remove a dependency edge between two skills."""
+        self._db.query(
+            """
+            MATCH (a:Skill {name: $skill_name})-[r:DEPENDS_ON]->(b:Skill {name: $depends_on})
+            DELETE r
+            """,
+            params={"skill_name": skill_name, "depends_on": depends_on},
+        )
+
+    def get_dependencies(self, skill_name: str) -> list[Skill]:
+        """Return skills that *skill_name* depends on."""
+        rows = self._db.query(
+            """
+            MATCH (a:Skill {name: $skill_name})-[:DEPENDS_ON]->(s:Skill)
+            RETURN s.name AS name,
+                   s.description AS description,
+                   s.content AS content,
+                   s.license AS license,
+                   s.compatibility AS compatibility,
+                   s.metadata AS metadata,
+                   s.allowed_tools AS allowed_tools,
+                   s.created_at AS created_at,
+                   s.updated_at AS updated_at
+            ORDER BY name
+            """,
+            params={"skill_name": skill_name},
+        )
+        return [self._row_to_skill(r) for r in rows]
+
+    def get_dependents(self, skill_name: str) -> list[Skill]:
+        """Return skills that depend on *skill_name*."""
+        rows = self._db.query(
+            """
+            MATCH (s:Skill)-[:DEPENDS_ON]->(b:Skill {name: $skill_name})
+            RETURN s.name AS name,
+                   s.description AS description,
+                   s.content AS content,
+                   s.license AS license,
+                   s.compatibility AS compatibility,
+                   s.metadata AS metadata,
+                   s.allowed_tools AS allowed_tools,
+                   s.created_at AS created_at,
+                   s.updated_at AS updated_at
+            ORDER BY name
+            """,
+            params={"skill_name": skill_name},
+        )
+        return [self._row_to_skill(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _row_to_skill(row: dict) -> Skill:
+        metadata_raw = row.get("metadata")
+        metadata = json.loads(metadata_raw) if metadata_raw else {}
+
+        tools_raw = row.get("allowed_tools")
+        allowed_tools = json.loads(tools_raw) if tools_raw else []
+
+        return Skill(
+            name=row["name"],
+            description=row["description"],
+            content=row["content"],
+            license=row.get("license"),
+            compatibility=row.get("compatibility"),
+            metadata=metadata,
+            allowed_tools=allowed_tools,
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )

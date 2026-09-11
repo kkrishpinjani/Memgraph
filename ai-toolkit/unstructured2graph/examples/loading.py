@@ -1,0 +1,47 @@
+import asyncio
+import logging
+import os
+import shutil
+
+import sources as SOURCES
+
+from lightrag_memgraph import MemgraphLightRAGWrapper
+from memgraph_toolbox.api.memgraph import Memgraph
+from unstructured2graph import from_unstructured
+
+SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+LIGHTRAG_DIR = os.path.join(SCRIPT_DIR, "..", "lightrag_storage.out")
+
+
+async def from_unstructured_with_prep():
+    # Recreate the working directory so this example starts from a clean state.
+    lightrag_log_file = os.path.join(LIGHTRAG_DIR, "lightrag.log")
+    if os.path.exists(lightrag_log_file):
+        os.remove(lightrag_log_file)
+    if os.path.exists(LIGHTRAG_DIR):
+        shutil.rmtree(LIGHTRAG_DIR)
+    if not os.path.exists(LIGHTRAG_DIR):
+        os.mkdir(LIGHTRAG_DIR)
+
+    # from_unstructured creates the Chunk.hash uniqueness constraint itself.
+    memgraph = Memgraph(user_agent="unstructured2graph")
+    memgraph.query("MATCH (n) DETACH DELETE n;")
+
+    lightrag_wrapper = MemgraphLightRAGWrapper(log_level="WARNING")
+    await lightrag_wrapper.initialize(working_dir=LIGHTRAG_DIR)
+
+    await from_unstructured(
+        SOURCES.MEMGRAPH_DOCS_GITHUB_LATEST_RAW,
+        memgraph,
+        lightrag_wrapper,
+        only_chunks=False,
+        link_chunks=True,
+        enforce_ontology=True,  # promote entity_type to real labels (:Person, :Organization, ...)
+    )
+    await lightrag_wrapper.afinalize()
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+
+    asyncio.run(from_unstructured_with_prep())
